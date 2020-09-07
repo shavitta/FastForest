@@ -8,7 +8,7 @@ import collections
 import xgboost
 import shap
 from scipy.stats import mannwhitneyu
-from sklearn.model_selection import StratifiedKFold, RandomizedSearchCV
+from sklearn.model_selection import StratifiedKFold, RandomizedSearchCV, KFold
 from sklearn.metrics import accuracy_score, average_precision_score, roc_auc_score, precision_score, confusion_matrix
 from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBClassifier
@@ -25,6 +25,7 @@ SEED = 33
 SPLIT_FOLDS = 10
 TUNE_FOLDS = 3
 VERBOSE = True
+MISSING = 999
 
 
 def calc_tpr_fpr(y_true, y_prediction):
@@ -130,6 +131,14 @@ def encode_categorical_features(df, to_exclude=[]):
     return df
 
 
+def fill_missing_values(df):
+    df_cat_columns = df.select_dtypes(include=['category', object]).columns.tolist()
+    df_num_columns = [x for x in df.columns.tolist() if x not in df_cat_columns]
+    df[df_cat_columns] = df[df_cat_columns].fillna(MISSING)
+    df[df_num_columns] = df[df_num_columns].fillna(0)
+    return df
+
+
 if __name__ == "__main__":
     total = 0
 
@@ -167,18 +176,29 @@ if __name__ == "__main__":
                   (file_name.rindex('\\') + 1):file_name.rindex('.')]  # TODO: works in windows. check in Linux
         total = total + 1
         print('Working on dataset {} out of {}, ds name: {}'.format(total, len(datasets), ds_name))
-        # TODO: temp
-        if ds_name in ['analcatdata_germangss', 'analcatdata_lawsuit', 'acute-inflammation', 'acute-nephritis']:
+        # TODO: temp - DSs that have results
+        if ds_name in ['analcatdata_germangss', 'analcatdata_lawsuit', 'acute-inflammation', 'acute-nephritis',
+                       'abalon', 'analcatdata_boxing1', 'analcatdata_asbestos', 'ar4', 'annealing',
+                       'analcatdata_broadwaymult']:
+            continue
+
+        # TODO: problematic. need to rerun, no results (temp)
+        if ds_name in ['arrhythmia', 'audiology-std']:
             continue
 
         df = pd.read_csv(file_name)
 
         # 2. Minimal preprocessing
 
+        # fill in missing values
+        df = fill_missing_values(df)
+
         # One hot encoding for the categorical features
         class_col = df.shape[1] - 1
+        class_name = df.columns[class_col]
         df = encode_categorical_features(df, [df.columns[class_col]])
-        X, y = split_to_X_and_y(df, class_col)
+
+        X, y = split_to_X_and_y(df, df.columns.get_loc(class_name))
 
         is_multi_class = False
         if len(np.unique(y)) > 2:
@@ -189,9 +209,20 @@ if __name__ == "__main__":
             labelencoder = LabelEncoder()
             y = labelencoder.fit_transform(y)
 
+        # Check that the number of samples of each class value is greater than the folds size. if so can use stratification
+        to_stratify = True
+        unique, counts = np.unique(y, return_counts=True)
+        counts = np.sort(counts)
+        folds_size = int(y.shape[0] / 10)
+        if counts[0] < folds_size:
+            to_stratify = False
 
         # 3. 10-Fold CV for splitting for training and testing
-        skf = StratifiedKFold(n_splits=10, shuffle=True, random_state=SEED)
+        skf = None
+        if to_stratify:
+            skf = StratifiedKFold(n_splits=10, shuffle=True, random_state=SEED)
+        else:
+            skf = KFold(n_splits=10, shuffle=True, random_state=SEED)
 
         j = 0
         for train, test in skf.split(X, y):
@@ -219,8 +250,9 @@ if __name__ == "__main__":
             results = create_and_run_estimator(X_train, y_train, X_test, y_test, j + 1, 'FastForest', results, ds_name)
 
             # 4. 5. 6. Search for best parameters, fit, predict and calculate performance for RF
-            results = create_and_run_estimator(X_train, y_train, X_test, y_test, j + 1, 'RandomForest', results, ds_name)
-            results.to_csv("results.csv") # TODO: temp, to mid-stage saving
+            results = create_and_run_estimator(X_train, y_train, X_test, y_test, j + 1, 'RandomForest', results,
+                                               ds_name)
+            results.to_csv("results.csv")  # TODO: temp, to mid-stage saving
 
             j = j + 1
 
@@ -280,8 +312,10 @@ if __name__ == "__main__":
         rf_avg_training_time = rf_ds['AUC'].mean()
         is_ff_faster = int(ff_avg_training_time > rf_avg_training_time)
 
-        meta_dataset.loc[((meta_dataset['Algorithm Name'] == 'FastForest') & (meta_dataset['dataset'] == d)), 'Best AUC'] = is_ff_faster
-        meta_dataset.loc[((meta_dataset['Algorithm Name'] == 'RandomForest') & (meta_dataset['dataset'] == d)), 'Best AUC'] = 1 - is_ff_faster
+        meta_dataset.loc[((meta_dataset['Algorithm Name'] == 'FastForest') & (
+                    meta_dataset['dataset'] == d)), 'Best AUC'] = is_ff_faster
+        meta_dataset.loc[((meta_dataset['Algorithm Name'] == 'RandomForest') & (
+                    meta_dataset['dataset'] == d)), 'Best AUC'] = 1 - is_ff_faster
 
     # Create the XGBoost model, fit and predict, with Leave-one-dataset-out
     meta_dataset = encode_categorical_features(meta_dataset, ['dataset'])
@@ -291,7 +325,7 @@ if __name__ == "__main__":
     i = 1
     for d in ds_names:
         train_df = meta_dataset[meta_dataset['dataset'] != d]
-        test_df  = meta_dataset[meta_dataset['dataset'] == d]
+        test_df = meta_dataset[meta_dataset['dataset'] == d]
 
         # the 'dataset' column is redundant at this stage
         ds_col = meta_dataset.columns.get_loc('dataset')
@@ -313,8 +347,8 @@ if __name__ == "__main__":
         inference_time_for_1000 = round(((time.time() - inference_start_time) / len(X_test) * 1000), 2)
 
         meta_results = create_performance_summary_record_in_results(y_test, y_pred, '', i, '', training_time,
-                                                 inference_time_for_1000, meta_results, d)
-        meta_results.to_csv("meta_results.csv") # TODO: temp
+                                                                    inference_time_for_1000, meta_results, d)
+        meta_results.to_csv("meta_results.csv")  # TODO: temp
         i = i + 1
 
     # meta_results.to_csv("meta_results.csv")
@@ -349,4 +383,3 @@ if __name__ == "__main__":
     shap.force_plot(explainer.expected_value, shap_values, X)
     # shap.dependence_plot("f1", shap_values, X)
     shap.summary_plot(shap_values, X)
-

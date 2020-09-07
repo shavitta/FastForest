@@ -94,7 +94,7 @@ class MyDecisionTreeClassifier(DecisionTreeClassifier):
         if VERBOSE:
             print("in MyDecisionTreeClassifier fit function :::: X size: {}, y size: {}".format(len(X), len(y)))
         self.depth = 0
-        self.n_classes_ = len(np.unique(y))
+        self.n_classes_ = int(np.max(y)) + 1
         self.n_samples_, self.n_features_ = X.shape
 
         self.root = self.build_tree(X, y)
@@ -125,7 +125,10 @@ class MyDecisionTreeClassifier(DecisionTreeClassifier):
 
         for i in range(len(classes_count)):
             c = int(unique_classes[i])
-            probs[c] = classes_count[i] / y.shape[0]
+            try:
+                probs[c] = classes_count[i] / y.shape[0]
+            except IndexError:
+                print(unique_classes, classes_count, y)
         if VERBOSE:
             print("In get_classification_proba ::: self.n_classes_={}".format(self.n_classes_))
             print("unique_classes {}, classes_count {}, probs {}".format(unique_classes, classes_count, probs))
