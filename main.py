@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-import pickle
 import os
 import glob
 import time
@@ -18,17 +17,22 @@ from matplotlib import pyplot
 from algorithms.FastTreeClassifier import FastForestClassifier, MyRandomForestClassifier
 
 import warnings
-
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-SEED = 33
-SPLIT_FOLDS = 10
-TUNE_FOLDS = 3
-VERBOSE = True
-MISSING = 999
+SEED = 33               # for randomness
+SPLIT_FOLDS = 10        # the number of folds for train-test splits (the outer loop)
+TUNE_FOLDS = 3          # the number of folds for the parameters tuning
+VERBOSE = False         # for debug prints
+MISSING = 999           # missing data code
 
 
 def calc_tpr_fpr(y_true, y_prediction):
+    """
+    The function calculates the TPR and FPR metrics
+    :param y_true: the true classification of the set
+    :param y_prediction: the predicted classification of the set
+    :return:T PR and FPR arrays
+    """
     cnf_matrix = confusion_matrix(y_true, y_prediction)
 
     FP = cnf_matrix.sum(axis=0) - np.diag(cnf_matrix)
@@ -49,6 +53,19 @@ def calc_tpr_fpr(y_true, y_prediction):
 
 def create_performance_summary_record_in_results(y_test, y_pred, algo_name, cv_index, best_parameters, training_time,
                                                  inference_time_for_1000, record_results, ds_name):
+    """
+    The functions calculates all the metrics required and adds it as a row to the record_results dataframe
+    :param y_test: the Y test set
+    :param y_pred: the predicted probabilities outputted by the forest
+    :param algo_name: FastForest or RandomForest
+    :param cv_index: the CV index of this run [1, ... , SPLITS_FOLDS)
+    :param best_parameters: the best parameters found by the RandomizedSearchCV
+    :param training_time: the measured time for the training of the forest
+    :param inference_time_for_1000: the measured time for the prediction for 1000 samples
+    :param record_results: the results dataframe of all the datasets
+    :param ds_name: the dataset name
+    :return: the updated results dataframe
+    """
     is_multi_class = False
     if len(np.unique(y_test)) > 2:
         is_multi_class = True
@@ -67,7 +84,7 @@ def create_performance_summary_record_in_results(y_test, y_pred, algo_name, cv_i
         auc = roc_auc_score(y_test, y_pred, multi_class="ovr", average="weighted")
     else:
         auc = roc_auc_score(y_test, y_pred[:, 1])
-        pr = average_precision_score(y_test, y_pred_class)
+        pr = average_precision_score(y_test, y_pred_class)      # PR is relevant only for binary classification
     tpr, fpr = calc_tpr_fpr(y_test, y_pred_class)
     precision = precision_score(y_test, y_pred_class, average="weighted")
 
@@ -90,6 +107,19 @@ def create_performance_summary_record_in_results(y_test, y_pred, algo_name, cv_i
 
 
 def create_and_run_estimator(X_train, y_train, X_test, y_test, index, algo_name, results, ds_name):
+    """
+    Creates FastForest or Random Forest, tunes its parameters using RandomizedSearchCV, runs it and calculated its
+    performance metrics
+    :param X_train
+    :param y_train
+    :param X_test
+    :param y_test
+    :param index: the CV index of this run [1, ... , SPLITS_FOLDS)
+    :param algo_name: FastForest or RandomForest,
+    :param results: the results dataframe of all the datasets
+    :param ds_name: the dataset name
+    :return:
+    """
     if VERBOSE:
         print('index: {}, algo_name: {}'.format(index, algo_name))
 
@@ -98,10 +128,10 @@ def create_and_run_estimator(X_train, y_train, X_test, y_test, index, algo_name,
     rs = None
     if algo_name == 'RandomForest':
         rs = RandomizedSearchCV(estimator=MyRandomForestClassifier(), param_distributions=random_grid, n_iter=50,
-                                cv=3, random_state=SEED)
+                                cv=TUNE_FOLDS, random_state=SEED)
     else:
         rs = RandomizedSearchCV(estimator=FastForestClassifier(), param_distributions=random_grid, n_iter=50,
-                                cv=3, random_state=SEED)
+                                cv=TUNE_FOLDS, random_state=SEED)
     rs.fit(X_train, y_train)
     best_parameters = rs.best_params_
     training_time_random = round((time.time() - train_start_time), 2)
@@ -119,12 +149,24 @@ def create_and_run_estimator(X_train, y_train, X_test, y_test, index, algo_name,
 
 
 def split_to_X_and_y(df, class_col):
+    """
+    Splits a dataframe into 2 arrays: the features and the classification label (class)
+    :param df: the dataframe
+    :param class_col: the index of the class column
+    :return: X, y arrays
+    """
     X = np.array(df.drop(df.columns[class_col], axis=1))
     y = np.array(df[df.columns[class_col]])
     return X, y
 
 
 def encode_categorical_features(df, to_exclude=[]):
+    """
+    Finds the categorical columns in a dataframe and code the with one-hot encoding
+    :param df: the dataframe
+    :param to_exclude: columns to exclude from the encoding (for example, the class column)
+    :return: the updated dataframe
+    """
     df_cat_columns = df.select_dtypes(include=['category', object]).columns.tolist()
     columns = [x for x in df_cat_columns if x not in to_exclude]
     df = pd.get_dummies(df, columns=columns)
@@ -132,6 +174,11 @@ def encode_categorical_features(df, to_exclude=[]):
 
 
 def fill_missing_values(df):
+    """
+    Fills missing values in the dataframe - for categorical columns with MISSING and for numerical columns with 0
+    :param df: the dataframe
+    :return: the updated dataframe
+    """
     df_cat_columns = df.select_dtypes(include=['category', object]).columns.tolist()
     df_num_columns = [x for x in df.columns.tolist() if x not in df_cat_columns]
     df[df_cat_columns] = df[df_cat_columns].fillna(MISSING)
@@ -139,62 +186,82 @@ def fill_missing_values(df):
     return df
 
 
+def check_extreme_minority_class(df, class_col, unique, counts):
+    """
+    Checkes whether a dataframe has an extreme minor classes, that is, class values with less then 5 occurrences. In that
+    case the function removes them and returns the updated dataframe
+    :param df: the dataframe
+    :param class_col: the index of the class column
+    :param unique: the unique class values
+    :param counts: the count of each unique class value
+    :return: the updated dataframe
+    """
+    for i in range(len(counts)):
+        if counts[i] < 5:
+            df = df[df[df.columns[class_col]] != unique[i]]
+    return df
+
+
+    #######################################  MAIN SECTION #######################################
+
+
 if __name__ == "__main__":
     total = 0
 
+    # Initialize the results dataframe with all the mterics columns
     results = pd.DataFrame(
         columns=['Dataset Name', 'Algorithm Name', 'Cross Validation', 'Hyper-Parameters Values', 'Accuracy', 'TPR',
                  'FPR', 'Precision', 'AUC', 'PR-Curve', 'Training Time', 'Inference Time'])
 
+    # Find all the datasets file name in the data folder and store then in the datasets array
     datasets = []
     datasets_folder = os.getcwd() + '/classification_datasets/'
     for d in glob.glob(datasets_folder + '*.csv'):
         datasets.append(d)
 
-    random_grid = {'bootstrap': [True, False],
-                   'max_depth': [5, 8, 15],
-                   'max_features': ['auto', 'sqrt'],
-                   'min_samples_leaf': [1, 2, 4],
-                   'n_estimators': [5, 15, 60]}
+    # Initialize the grid for the random search
+    random_grid = {'bootstrap': [True, False],          # relevant only for Random Forest: whether to use bootstrapping or not
+                   'max_depth': [5, 8, 15],             # the Decision Tree max depth
+                   'max_features': ['auto', 'sqrt'],    # relevant only for Random Forest: the subspacing method
+                   'min_samples_leaf': [1, 2, 4],       # the minimal number of samples in the Decision Tree's leaves
+                   'n_estimators': [5, 15, 60]}         # the number of trees the forest should grow
 
-    #######################################  FastForest ALGORITHM PERFORMANCE #######################################
+    ###########################  FastForest AND RandonForest ALGORITHMS PERFORMANCE ################################
 
     # Go over all the datasets and -
-    # 1. Read the csv - last column is the class feature
-    # 2. Perform minimal preprocessing: encode the categorical features and class column, fill in missing values
+    # 1. Read the csv - last column is the class feature (unless otherwise stated)
+    # 2. Perform minimal preprocessing: encode the categorical features and class column, fill in missing values and so on
     # 3. Perform 10-Fold CV for splitting for training and testing (for FastForest (FF) and RandomForest (RF))
     # 4. Perform 3-Fold CV on the train set to tune the hyper-parameters (for FastForest (FF) and RandomForest (RF))
     # 5. Create the estimator with the best parameters and predict the class for the test set on the best
     #    hyper-parameters (for FF anf RF)
     # 6. Calculate performance measurements (for FF anf RF)
 
-    # for i in range(0):
     for i in range(len(datasets)):
         # 1. read the csv
         file_name = datasets[i]
-        ds_name = file_name[
-                  (file_name.rindex('\\') + 1):file_name.rindex('.')]  # TODO: works in windows. check in Linux
+        # TODO: this works in windows. Comment this and uncomment next line if working in Linux
+        ds_name = file_name[(file_name.rindex('\\') + 1):file_name.rindex('.')]
+        # ds_name = file_name[(file_name.rindex('/') + 1):file_name.rindex('.')]  # TODO: for Linux!
+
         total = total + 1
         print('Working on dataset {} out of {}, ds name: {}'.format(total, len(datasets), ds_name))
-        # TODO: temp - DSs that have results
-        if ds_name in ['analcatdata_germangss', 'analcatdata_lawsuit', 'acute-inflammation', 'acute-nephritis',
-                       'abalon', 'analcatdata_boxing1', 'analcatdata_asbestos', 'ar4', 'annealing',
-                       'analcatdata_broadwaymult']:
-            continue
-
-        # TODO: problematic. need to rerun, no results (temp)
-        if ds_name in ['arrhythmia', 'audiology-std']:
-            continue
-
         df = pd.read_csv(file_name)
 
         # 2. Minimal preprocessing
+
+        # check for extreme minority class - if their count is less than 5. Remove them
+        class_col = df.shape[1] - 1
+        if ds_name == 'solar-flare':
+            class_col = 0
+        unique, counts = np.unique(df[df.columns[class_col]], return_counts=True)
+        if ds_name != 'lenses':
+            df = check_extreme_minority_class(df, class_col, unique, counts)
 
         # fill in missing values
         df = fill_missing_values(df)
 
         # One hot encoding for the categorical features
-        class_col = df.shape[1] - 1
         class_name = df.columns[class_col]
         df = encode_categorical_features(df, [df.columns[class_col]])
 
@@ -204,32 +271,34 @@ if __name__ == "__main__":
         if len(np.unique(y)) > 2:
             is_multi_class = True
 
-        # Encode the class column in case it is a string
-        if y.dtype == 'O':
-            labelencoder = LabelEncoder()
-            y = labelencoder.fit_transform(y)
+        # Encode the class column (it might be a string, or not continuous in case we removed minority classes)
+        labelencoder = LabelEncoder()
+        y = labelencoder.fit_transform(y)
 
         # Check that the number of samples of each class value is greater than the folds size. if so can use stratification
         to_stratify = True
-        unique, counts = np.unique(y, return_counts=True)
         counts = np.sort(counts)
-        folds_size = int(y.shape[0] / 10)
-        if counts[0] < folds_size:
+        if counts[0] < SPLIT_FOLDS:
             to_stratify = False
 
         # 3. 10-Fold CV for splitting for training and testing
         skf = None
+        SPLIT_FOLDS = 10
+        # I used only 4 folds for the lenses dataset since it is very small and couldn't be split with stratification for 10 folds
+        if ds_name == 'lenses':
+            SPLIT_FOLDS = 4
+
         if to_stratify:
-            skf = StratifiedKFold(n_splits=10, shuffle=True, random_state=SEED)
+            skf = StratifiedKFold(n_splits=SPLIT_FOLDS, shuffle=True, random_state=SEED)
         else:
-            skf = KFold(n_splits=10, shuffle=True, random_state=SEED)
+            skf = KFold(n_splits=SPLIT_FOLDS, shuffle=True, random_state=SEED)
 
         j = 0
         for train, test in skf.split(X, y):
             X_train, X_test = X[train], X[test]
             y_train, y_test = y[train], y[test]
 
-            # make sure y_test has all classes represented
+            # make sure y_test has all classes represented, otherwise scikit-learn issues errors during the metrics calculations
             train_unique = np.unique(y_train)
             test_unique = np.unique(y_test)
             redundant = []
@@ -240,11 +309,13 @@ if __name__ == "__main__":
                 # remove all the lines with the redundant classes
                 for r in redundant:
                     indices = np.where(y_train == r)
-                    print(indices)
-                    print(len(X_train), len(y_train))
+                    if VERBOSE:
+                        print(indices)
+                        print(len(X_train), len(y_train))
                     X_train = np.delete(X_train, indices, axis=0)
                     y_train = np.delete(y_train, indices, axis=0)
-                    print(len(X_train), len(y_train))
+                    if VERBOSE:
+                        print(len(X_train), len(y_train))
 
             # 4. 5. 6. Search for best parameters, fit, predict and calculate performance for FF
             results = create_and_run_estimator(X_train, y_train, X_test, y_test, j + 1, 'FastForest', results, ds_name)
@@ -252,18 +323,16 @@ if __name__ == "__main__":
             # 4. 5. 6. Search for best parameters, fit, predict and calculate performance for RF
             results = create_and_run_estimator(X_train, y_train, X_test, y_test, j + 1, 'RandomForest', results,
                                                ds_name)
-            results.to_csv("results.csv")  # TODO: temp, to mid-stage saving
+            results.to_csv("results.csv")
 
             j = j + 1
 
-    # results.to_csv("results.csv")
-
-    results = pd.read_csv("results.csv")
+    # results = pd.read_csv("results.csv")
 
     #######################################  RESULTS SIGNIFICANCE  #######################################
 
     # Check if results for are statistically significant - first check the Training Time. The expectation is that FF is
-    # faster than RF. And then make sure the Accuracy is the same
+    # faster than RF. And then make sure the Accuracy is statistically the same
     ff_acc = results[results['Algorithm Name'] == 'FastForest'].Accuracy
     rf_acc = results[results['Algorithm Name'] == 'RandomForest'].Accuracy
     stat_acc, p_acc = mannwhitneyu(ff_acc, rf_acc)
@@ -287,11 +356,6 @@ if __name__ == "__main__":
 
     meta_dataset = pd.read_csv("ClassificationAllMetaFeatures.csv")
     ds_names = np.unique(results['Dataset Name'])
-
-    # TODO:TEMP!!
-    # meta_dataset = meta_dataset[(meta_dataset['dataset'] == 'acute-inflammation') | (meta_dataset['dataset'] == 'acute-nephritis') |
-    #                             (meta_dataset['dataset'] == 'analcatdata_germangss') | (meta_dataset['dataset'] == 'analcatdata_lawsuit') ]
-    # TODO: TEMP TILL HERE
 
     # Add the 'Best AUC' column
     meta_dataset['Best AUC'] = -1
@@ -351,9 +415,9 @@ if __name__ == "__main__":
         meta_results.to_csv("meta_results.csv")  # TODO: temp
         i = i + 1
 
-    # meta_results.to_csv("meta_results.csv")
 
     #######################################  FEATURES IMPORTANCE AND SHAP #######################################
+
 
     # First fit the model on the DF - drop the 'dataset' column and nan values
     ds_col = meta_dataset.columns.get_loc('dataset')
