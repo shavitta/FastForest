@@ -9,7 +9,8 @@ import shap
 from scipy.stats import mannwhitneyu
 from sklearn.model_selection import StratifiedKFold, RandomizedSearchCV, KFold
 from sklearn.metrics import accuracy_score, average_precision_score, roc_auc_score, precision_score, confusion_matrix
-from sklearn.preprocessing import LabelEncoder
+from sklearn.multiclass import OneVsRestClassifier
+from sklearn.preprocessing import LabelEncoder, label_binarize
 from xgboost import XGBClassifier
 from xgboost import plot_importance
 from matplotlib import pyplot
@@ -17,7 +18,8 @@ from matplotlib import pyplot
 from algorithms.FastTreeClassifier import FastForestClassifier, MyRandomForestClassifier
 
 import warnings
-warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.filterwarnings("ignore")
+# warnings.simplefilter(action='ignore', category=FutureWarning)
 
 SEED = 33               # for randomness
 SPLIT_FOLDS = 10        # the number of folds for train-test splits (the outer loop)
@@ -31,7 +33,7 @@ def calc_tpr_fpr(y_true, y_prediction):
     The function calculates the TPR and FPR metrics
     :param y_true: the true classification of the set
     :param y_prediction: the predicted classification of the set
-    :return:T PR and FPR arrays
+    :return:TPR and FPR arrays
     """
     cnf_matrix = confusion_matrix(y_true, y_prediction)
 
@@ -82,6 +84,7 @@ def create_performance_summary_record_in_results(y_test, y_pred, algo_name, cv_i
     pr = 0
     if is_multi_class and len(y_pred[0]) > 2:
         auc = roc_auc_score(y_test, y_pred, multi_class="ovr", average="weighted")
+        pr = calc_precision_recall(X_train, X_test, y_train, y_test, algo_name, best_parameters)
     else:
         auc = roc_auc_score(y_test, y_pred[:, 1])
         pr = average_precision_score(y_test, y_pred_class)      # PR is relevant only for binary classification
@@ -98,7 +101,7 @@ def create_performance_summary_record_in_results(y_test, y_pred, algo_name, cv_i
     record_results = record_results.append(
         {'Dataset Name': ds_name, 'Algorithm Name': algo_name, 'Cross Validation': cv_index,
          'Hyper-Parameters Values': best_parameters,
-         'Accuracy': round(acc, 4), 'TPR': round(np.mean(tpr), 4), 'FPR': round(np.mean(tpr), 4),
+         'Accuracy': round(acc, 4), 'TPR': round(np.mean(tpr), 4), 'FPR': round(np.mean(fpr), 4),
          'Precision': round(precision, 4), 'AUC': round(auc, 4),
          'PR-Curve': round(pr, 4), 'Training Time': training_time, 'Inference Time': inference_time_for_1000},
         ignore_index=True)
@@ -124,16 +127,28 @@ def create_and_run_estimator(X_train, y_train, X_test, y_test, index, algo_name,
         print('index: {}, algo_name: {}'.format(index, algo_name))
 
     # 3-Fold CV on the train set to tune the hyper-parameters with Random Search
-    train_start_time = time.time()
     rs = None
     if algo_name == 'RandomForest':
         rs = RandomizedSearchCV(estimator=MyRandomForestClassifier(), param_distributions=random_grid, n_iter=50,
                                 cv=TUNE_FOLDS, random_state=SEED)
     else:
-        rs = RandomizedSearchCV(estimator=FastForestClassifier(), param_distributions=random_grid, n_iter=50,
+        rs = RandomizedSearchCV(estimator=FastForestClassifier(), param_distributions=random_grid_ff, n_iter=50,
                                 cv=TUNE_FOLDS, random_state=SEED)
     rs.fit(X_train, y_train)
     best_parameters = rs.best_params_
+
+    train_start_time = time.time()
+    if algo_name == 'FastForest':
+        clf = FastForestClassifier(n_estimators=best_parameters['n_estimators'],
+                                   max_depth=best_parameters['max_depth'],
+                                   min_samples_leaf=best_parameters['min_samples_leaf'])
+    else:
+        clf = MyRandomForestClassifier(n_estimators=best_parameters['n_estimators'],
+                                       max_depth=best_parameters['max_depth'],
+                                       min_samples_leaf=best_parameters['min_samples_leaf'],
+                                       max_features=best_parameters['max_features'],
+                                       bootstrap=best_parameters['bootstrap'])
+    clf.fit(X_train, y_train)
     training_time_random = round((time.time() - train_start_time), 2)
 
     # Create the estimator with the best parameters and predict the class for the test set on the best hyper-parameters
@@ -201,6 +216,34 @@ def check_extreme_minority_class(df, class_col, unique, counts):
             df = df[df[df.columns[class_col]] != unique[i]]
     return df
 
+def calc_precision_recall(X_train, X_test, y_train, y_test, algo, best_params):
+    """
+        Calculates the Precision-Recall average for multi-class problems
+        :param y_true: the true classification of the set
+        :param y_prediction: y_prediction: the predicted classification of the set
+        :return: Precision-Recall curve average
+        """
+    n_classes = len(np.unique(y_train))
+    y_train_bin = label_binarize(y_train, classes=[*range(n_classes)])
+    clf = None
+    if algo == 'FastForest':
+        clf = OneVsRestClassifier(FastForestClassifier(n_estimators=best_params['n_estimators'],
+                                                       max_depth=best_params['max_depth'],
+                                                       min_samples_leaf=best_params['min_samples_leaf']))
+    else:
+        clf = OneVsRestClassifier(MyRandomForestClassifier(n_estimators=best_params['n_estimators'],
+                                                           max_depth=best_params['max_depth'],
+                                                           min_samples_leaf=best_params['min_samples_leaf'],
+                                                           max_features=best_params['max_features'],
+                                                           bootstrap=best_params['bootstrap']))
+    clf.fit(X_train, y_train_bin)
+    y_score = clf.predict_proba(X_test)
+
+    average_precision = []
+    y_test_bin = label_binarize(y_test, classes=[*range(n_classes)])
+    for i in range(n_classes):
+        average_precision.append(average_precision_score(y_test_bin[:, i], y_score[:, i]))
+    return round(np.mean(average_precision), 4)
 
     #######################################  MAIN SECTION #######################################
 
@@ -221,10 +264,14 @@ if __name__ == "__main__":
 
     # Initialize the grid for the random search
     random_grid = {'bootstrap': [True, False],          # relevant only for Random Forest: whether to use bootstrapping or not
-                   'max_depth': [5, 8, 15],             # the Decision Tree max depth
+                   'max_depth': [3, 6, 12],             # the Decision Tree max depth
                    'max_features': ['auto', 'sqrt'],    # relevant only for Random Forest: the subspacing method
-                   'min_samples_leaf': [1, 2, 4],       # the minimal number of samples in the Decision Tree's leaves
-                   'n_estimators': [5, 15, 60]}         # the number of trees the forest should grow
+                   'min_samples_leaf': [1, 3],       # the minimal number of samples in the Decision Tree's leaves
+                   'n_estimators': [5, 15, 40]}         # the number of trees the forest should grow
+
+    random_grid_ff = {'max_depth': [3, 6, 12],
+                      'min_samples_leaf': [1, 3],
+                      'n_estimators': [5, 15, 40]}
 
     ###########################  FastForest AND RandonForest ALGORITHMS PERFORMANCE ################################
 
@@ -238,9 +285,10 @@ if __name__ == "__main__":
     # 6. Calculate performance measurements (for FF anf RF)
 
     for i in range(len(datasets)):
+    # if False:
         # 1. read the csv
         file_name = datasets[i]
-        # TODO: this works in windows. Comment this and uncomment next line if working in Linux
+        # TODO: this works in windows. Comment this and uncomment following line if working in Linux
         ds_name = file_name[(file_name.rindex('\\') + 1):file_name.rindex('.')]
         # ds_name = file_name[(file_name.rindex('/') + 1):file_name.rindex('.')]  # TODO: for Linux!
 
@@ -277,8 +325,9 @@ if __name__ == "__main__":
 
         # Check that the number of samples of each class value is greater than the folds size. if so can use stratification
         to_stratify = True
+        unique, counts = np.unique(df[df.columns[class_col]], return_counts=True)
         counts = np.sort(counts)
-        if counts[0] < SPLIT_FOLDS:
+        if (counts[0] < SPLIT_FOLDS) and (ds_name != 'lung-cancer'):
             to_stratify = False
 
         # 3. 10-Fold CV for splitting for training and testing
@@ -295,6 +344,9 @@ if __name__ == "__main__":
 
         j = 0
         for train, test in skf.split(X, y):
+            if j<=3:
+                j = j + 1
+                continue
             X_train, X_test = X[train], X[test]
             y_train, y_test = y[train], y[test]
 
@@ -323,11 +375,40 @@ if __name__ == "__main__":
             # 4. 5. 6. Search for best parameters, fit, predict and calculate performance for RF
             results = create_and_run_estimator(X_train, y_train, X_test, y_test, j + 1, 'RandomForest', results,
                                                ds_name)
-            results.to_csv("results.csv")
+            results.to_csv("results.csv", index=False)
 
             j = j + 1
 
-    # results = pd.read_csv("results.csv")
+    results = pd.read_csv("results.csv")
+
+    # Add averages (and standard deviation) per feature as the last 2 rows
+    avgs = []
+    algos = ['FastForest', 'RandomForest']
+    for a in algos:
+        row = []
+        for c in results.columns:
+            if c == 'Algorithm Name':
+                row.append(a)
+            elif c == 'Dataset Name':
+                row.append('Average (Std)')
+            elif c in ['Cross Validation', 'Hyper-Parameters Values']:
+                row.append('')
+            else:
+                avg = round(np.mean(results[results['Algorithm Name'] == a][c]), 4)
+                std = round(np.std(results[results['Algorithm Name'] == a][c]), 4)
+                row_str = str(avg) + '(' + str(std) + ')'
+                row.append(row_str)
+        avgs.append(row)
+
+    results_with_avg = results.copy();
+    for avg in avgs:
+        results_with_avg = results_with_avg.append(
+            {'Dataset Name': avg[0], 'Algorithm Name': avg[1], 'Cross Validation': avg[2], 'Hyper-Parameters Values': avg[3],
+             'Accuracy': avg[4], 'TPR': avg[5], 'FPR': avg[6], 'Precision': avg[7], 'AUC': avg[8], 'PR-Curve': avg[9],
+             'Training Time': avg[10], 'Inference Time': avg[11]},
+            ignore_index=True)
+        results_with_avg.to_csv("results_with_avg.csv", index=False)
+
 
     #######################################  RESULTS SIGNIFICANCE  #######################################
 
@@ -336,14 +417,21 @@ if __name__ == "__main__":
     ff_acc = results[results['Algorithm Name'] == 'FastForest'].Accuracy
     rf_acc = results[results['Algorithm Name'] == 'RandomForest'].Accuracy
     stat_acc, p_acc = mannwhitneyu(ff_acc, rf_acc)
+    print("FF avg accuracy: {}, RF avg accuracy: {}".format(np.mean(ff_acc), np.mean(rf_acc)))
+
+    ff_auc = results[results['Algorithm Name'] == 'FastForest'].AUC
+    rf_auc = results[results['Algorithm Name'] == 'RandomForest'].AUC
+    stat_auc, p_auc = mannwhitneyu(ff_auc, rf_auc)
+    print("FF avg AUC: {}, RF avg AUC: {}".format(np.mean(ff_auc), np.mean(rf_auc)))
 
     ff_time = results[results['Algorithm Name'] == 'FastForest']['Training Time']
     rf_time = results[results['Algorithm Name'] == 'RandomForest']['Training Time']
     stat_time, p_time = mannwhitneyu(ff_time, rf_time)
-    print('Mann–Whitney U test value for training time: {} ({}), for accuracy: {} ({})'.format(round(stat_time, 2),
-                                                                                               round(p_time, 4),
-                                                                                               round(stat_acc, 2),
-                                                                                               round(p_acc, 4)))
+    print("FF avg training time: {}, RF avg training time: {}".format(np.mean(ff_time), np.mean(rf_time)))
+
+    print('Mann–Whitney U test value for training time: {} ({}), '
+          'for accuracy: {} ({}), for AUC:{} ({})'.format(round(stat_time, 2), round(p_time, 4), round(stat_acc, 2),
+                                                          round(p_acc, 4), round(stat_auc, 2), round(p_auc, 4)))
 
     #######################################  META LEARNING MODEL #######################################
 
@@ -400,6 +488,10 @@ if __name__ == "__main__":
         X_train, y_train = split_to_X_and_y(train_df, class_col)
         X_test, y_test = split_to_X_and_y(test_df, class_col)
 
+        # TODO: temp!!!!
+        if len(X_test) == 0:
+            continue
+
         xgb = XGBClassifier()
 
         train_start_time = time.time()
@@ -412,7 +504,7 @@ if __name__ == "__main__":
 
         meta_results = create_performance_summary_record_in_results(y_test, y_pred, '', i, '', training_time,
                                                                     inference_time_for_1000, meta_results, d)
-        meta_results.to_csv("meta_results.csv")  # TODO: temp
+        meta_results.to_csv("meta_results.csv", index=False)
         i = i + 1
 
 
@@ -447,3 +539,11 @@ if __name__ == "__main__":
     shap.force_plot(explainer.expected_value, shap_values, X)
     # shap.dependence_plot("f1", shap_values, X)
     shap.summary_plot(shap_values, X)
+
+
+    #################################  FOR THE REPORT ILLUSTRATION SECTION ###################################
+
+    ds = pd.read_csv('classification_datasets/illustration.csv')
+    X, y = split_to_X_and_y(ds, ds.shape[1] - 1)
+    ff = FastForestClassifier(n_estimators=1, max_depth=3, min_samples_leaf=2)
+    ff.fit(X, y)

@@ -495,6 +495,7 @@ def _build_trees_with_half_sub_bagging(tree, forest, X, y, sample_weight, tree_i
 
     if VERBOSE:
         print("in _build_trees_with_half_sub_bagging :::: new_X size: {}, new_y size: {}".format(len(new_X), len(new_y)))
+        print(new_X)
 
     tree.fit(new_X, new_y, sample_weight=sample_weight, check_input=False)
 
@@ -515,7 +516,7 @@ class FastForestClassifier(RandomForestClassifier):
                  min_samples_split=2,
                  min_samples_leaf=1,
                  min_weight_fraction_leaf=0.,
-                 max_features="auto",
+                 max_features="fast",
                  max_leaf_nodes=None,
                  min_impurity_decrease=0.,
                  min_impurity_split=None,
@@ -615,7 +616,7 @@ class FastForestClassifier(RandomForestClassifier):
                                                             min_samples_split=self.min_samples_split,
                                                             min_samples_leaf=self.min_samples_split,
                                                             min_weight_fraction_leaf=self.min_weight_fraction_leaf,
-                                                            max_features=self.max_features,
+                                                            max_features="fast",
                                                             max_leaf_nodes=self.max_leaf_nodes,
                                                             min_impurity_decrease=self.min_impurity_decrease,
                                                             min_impurity_split=self.min_impurity_split,
