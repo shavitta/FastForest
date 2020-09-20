@@ -13,7 +13,7 @@ from sklearn.multiclass import OneVsRestClassifier
 from sklearn.preprocessing import LabelEncoder, label_binarize
 from xgboost import XGBClassifier
 from xgboost import plot_importance
-from matplotlib import pyplot
+from matplotlib import pyplot as plt
 
 from algorithms.FastTreeClassifier import FastForestClassifier, MyRandomForestClassifier
 
@@ -245,6 +245,21 @@ def calc_precision_recall(X_train, X_test, y_train, y_test, algo, best_params):
         average_precision.append(average_precision_score(y_test_bin[:, i], y_score[:, i]))
     return round(np.mean(average_precision), 4)
 
+
+def plot_xgb_importance(res, label, col_names):
+    res_sorted = {k: v for k, v in sorted(res.items(), key=lambda item: item[1], reverse=True)}
+    most_values = list(res_sorted.values())
+    most_keys = list(res_sorted.keys())
+
+    # Build an array with the feature names
+    features = []
+    for f in most_keys[:10]:
+        features.append(col_names[int(f[1:])])
+    data = pd.DataFrame(data=most_values[:10], index=features, columns=[label]).sort_values(by=label, ascending=True)
+    data.plot(kind='barh')
+    plt.show()
+    return res_sorted
+
     #######################################  MAIN SECTION #######################################
 
 
@@ -284,8 +299,8 @@ if __name__ == "__main__":
     #    hyper-parameters (for FF anf RF)
     # 6. Calculate performance measurements (for FF anf RF)
 
-    for i in range(len(datasets)):
-    # if False:
+    # for i in range(len(datasets)):
+    if False:
         # 1. read the csv
         file_name = datasets[i]
         # TODO: this works in windows. Comment this and uncomment following line if working in Linux
@@ -429,9 +444,20 @@ if __name__ == "__main__":
     stat_time, p_time = mannwhitneyu(ff_time, rf_time)
     print("FF avg training time: {}, RF avg training time: {}".format(np.mean(ff_time), np.mean(rf_time)))
 
+    ff_inf_time = results[results['Algorithm Name'] == 'FastForest']['Inference Time']
+    rf_inf_time = results[results['Algorithm Name'] == 'RandomForest']['Inference Time']
+    stat_inf_time, p_inf_time = mannwhitneyu(ff_inf_time, rf_inf_time)
+    print("FF avg inference time: {}, RF avg inference time: {}".format(np.mean(ff_inf_time), np.mean(rf_inf_time)))
+
     print('Mann–Whitney U test value for training time: {} ({}), '
-          'for accuracy: {} ({}), for AUC:{} ({})'.format(round(stat_time, 2), round(p_time, 4), round(stat_acc, 2),
-                                                          round(p_acc, 4), round(stat_auc, 2), round(p_auc, 4)))
+          'for accuracy: {} ({}), for AUC: {} ({}), for inference time: {} ({})'.format(round(stat_time, 2),
+                                                                                        round(p_time, 4),
+                                                                                        round(stat_acc, 2),
+                                                                                        round(p_acc, 4),
+                                                                                        round(stat_auc, 2),
+                                                                                        round(p_auc, 4),
+                                                                                        round(stat_inf_time, 2),
+                                                                                        round(p_inf_time, 4)))
 
     #######################################  META LEARNING MODEL #######################################
 
@@ -458,16 +484,27 @@ if __name__ == "__main__":
 
     # Populate the 'BEST AUC' column with 1 or 0 according to whether the Best AUC score was obtained with that algorithm
     for d in ds_names:
+        m = d
+        # Some DSs appear with a different name in the meta data csv file
+        if d == 'abalon':
+            m = 'abalone'
+        elif d == 'pittsburg-bridges-T-OR-D_R':
+            m = 'pittsburg-bridges-T-OR-D'
+        elif d == 'statlog-heart_':
+            m = 'statlog-heart'
+        elif d == 'wine-quality-red':
+            m = 'wine_quality_red'
+
         ff_ds = results[(results['Algorithm Name'] == 'FastForest') & (results['Dataset Name'] == d)]
         rf_ds = results[(results['Algorithm Name'] == 'RandomForest') & (results['Dataset Name'] == d)]
         ff_avg_training_time = ff_ds['AUC'].mean()
         rf_avg_training_time = rf_ds['AUC'].mean()
-        is_ff_faster = int(ff_avg_training_time > rf_avg_training_time)
+        is_ff_better = int(ff_avg_training_time > rf_avg_training_time)
 
         meta_dataset.loc[((meta_dataset['Algorithm Name'] == 'FastForest') & (
-                    meta_dataset['dataset'] == d)), 'Best AUC'] = is_ff_faster
+                    meta_dataset['dataset'] == m)), 'Best AUC'] = is_ff_better
         meta_dataset.loc[((meta_dataset['Algorithm Name'] == 'RandomForest') & (
-                    meta_dataset['dataset'] == d)), 'Best AUC'] = 1 - is_ff_faster
+                    meta_dataset['dataset'] == m)), 'Best AUC'] = 1 - is_ff_better
 
     # Create the XGBoost model, fit and predict, with Leave-one-dataset-out
     meta_dataset = encode_categorical_features(meta_dataset, ['dataset'])
@@ -476,21 +513,26 @@ if __name__ == "__main__":
                  'FPR', 'Precision', 'AUC', 'PR-Curve', 'Training Time', 'Inference Time'])
     i = 1
     for d in ds_names:
+        # Some DSs appear with a different name in the meta data csv file
+        if d == 'abalon':
+            d = 'abalone'
+        elif d == 'pittsburg-bridges-T-OR-D_R':
+            d = 'pittsburg-bridges-T-OR-D'
+        elif d == 'statlog-heart_':
+            d = 'statlog-heart'
+        elif d == 'wine-quality-red':
+            d = 'wine_quality_red'
+
         train_df = meta_dataset[meta_dataset['dataset'] != d]
         test_df = meta_dataset[meta_dataset['dataset'] == d]
-
-        # the 'dataset' column is redundant at this stage
-        ds_col = meta_dataset.columns.get_loc('dataset')
-        train_df = train_df.drop(train_df.columns[ds_col], axis=1)
-        test_df = test_df.drop(test_df.columns[ds_col], axis=1)
 
         class_col = meta_dataset.columns.get_loc('Best AUC')
         X_train, y_train = split_to_X_and_y(train_df, class_col)
         X_test, y_test = split_to_X_and_y(test_df, class_col)
 
-        # TODO: temp!!!!
-        if len(X_test) == 0:
-            continue
+        # the 'dataset' column is redundant at this stage
+        X_train = np.delete(X_train, [0], axis=1)
+        X_test = np.delete(X_test, [0], axis=1)
 
         xgb = XGBClassifier()
 
@@ -507,17 +549,35 @@ if __name__ == "__main__":
         meta_results.to_csv("meta_results.csv", index=False)
         i = i + 1
 
+    meta_results = pd.read_csv("meta_results.csv")
+    avgs = []
+    for c in meta_results.columns:
+        if c == 'Dataset Name':
+            avgs.append('Average (Std)')
+        elif c in ['Algorithm Name', 'Cross Validation', 'Hyper-Parameters Values']:
+            avgs.append('')
+        else:
+            avg = round(meta_results[c].mean(), 4)
+            std = round((meta_results[c].std()), 4)
+            row_str = str(avg) + '(' + str(std) + ')'
+            avgs.append(row_str)
+
+    meta_results_with_avg = meta_results.copy()
+    meta_results_with_avg = meta_results_with_avg.append(
+            {'Dataset Name': avgs[0], 'Algorithm Name': avgs[1], 'Cross Validation': avgs[2],
+             'Hyper-Parameters Values': avgs[3],
+             'Accuracy': avgs[4], 'TPR': avgs[5], 'FPR': avgs[6], 'Precision': avgs[7], 'AUC': avgs[8], 'PR-Curve': avgs[9],
+             'Training Time': avgs[10], 'Inference Time': avgs[11]},
+            ignore_index=True)
+    meta_results_with_avg.to_csv("meta_results_with_avg.csv", index=False)
 
     #######################################  FEATURES IMPORTANCE AND SHAP #######################################
 
-
     # First fit the model on the DF - drop the 'dataset' column and nan values
-    ds_col = meta_dataset.columns.get_loc('dataset')
-    meta_dataset = meta_dataset.drop(meta_dataset.columns[ds_col], axis=1)
     meta_dataset.fillna(0, inplace=True)
-
     class_col = meta_dataset.columns.get_loc('Best AUC')
     X, y = split_to_X_and_y(meta_dataset, class_col)
+    X = np.delete(X, [0], axis=1)
 
     xgb = XGBClassifier(booster='gbtree')
     xgb.fit(X, y)
@@ -526,24 +586,25 @@ if __name__ == "__main__":
     gain_res = xgb.get_booster().get_score(importance_type='gain')
     cover_res = xgb.get_booster().get_score(importance_type='cover')
 
-    tryy = xgb.feature_importances_
+    # Plot the 10 most features per importance type
+    weight_res = plot_xgb_importance(weight_res, 'Weight', meta_dataset.columns)
+    gain_res = plot_xgb_importance(gain_res, 'Gain', meta_dataset.columns)
+    cover_res = plot_xgb_importance(cover_res, 'Cover', meta_dataset.columns)
 
-    print(weight_res)
-    print(gain_res)
-    print(cover_res)
+    # Save the results for all the meta-features in a csv file
+    data = {'Weight': list(weight_res.keys()), 'Gain': list(gain_res.keys()), 'Cover': list(cover_res.keys())}
+    importance_df = pd.DataFrame(data)
+    importance_df.to_csv('importance.csv')
 
     # SHAP
-    model = xgboost.train({"learning_rate": 0.01}, xgboost.DMatrix(X, label=y))
-    explainer = shap.TreeExplainer(model)
+    explainer = shap.TreeExplainer(xgb)
     shap_values = explainer.shap_values(X)
-    shap.force_plot(explainer.expected_value, shap_values, X)
-    # shap.dependence_plot("f1", shap_values, X)
-    shap.summary_plot(shap_values, X)
+    shap.summary_plot(shap_values, X, feature_names=meta_dataset.columns)
 
 
     #################################  FOR THE REPORT ILLUSTRATION SECTION ###################################
 
-    ds = pd.read_csv('classification_datasets/illustration.csv')
-    X, y = split_to_X_and_y(ds, ds.shape[1] - 1)
-    ff = FastForestClassifier(n_estimators=1, max_depth=3, min_samples_leaf=2)
-    ff.fit(X, y)
+    # ds = pd.read_csv('classification_datasets/illustration.csv')
+    # X, y = split_to_X_and_y(ds, ds.shape[1] - 1)
+    # ff = FastForestClassifier(n_estimators=1, max_depth=3, min_samples_leaf=2)
+    # ff.fit(X, y)
