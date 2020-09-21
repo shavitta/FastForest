@@ -19,7 +19,6 @@ from algorithms.FastTreeClassifier import FastForestClassifier, MyRandomForestCl
 
 import warnings
 warnings.filterwarnings("ignore")
-# warnings.simplefilter(action='ignore', category=FutureWarning)
 
 SEED = 33               # for randomness
 SPLIT_FOLDS = 10        # the number of folds for train-test splits (the outer loop)
@@ -247,6 +246,13 @@ def calc_precision_recall(X_train, X_test, y_train, y_test, algo, best_params):
 
 
 def plot_xgb_importance(res, label, col_names):
+    """
+    Creates a bar plot of the 10 most important features
+    :param res: the most important features by weight, gain or cover importance type
+    :param label: weight, gain or cover. To be included in the plot
+    :param col_names: the features names, to be displayed in the plot
+    :return: the sorted res dictionary in a descending order
+    """
     res_sorted = {k: v for k, v in sorted(res.items(), key=lambda item: item[1], reverse=True)}
     most_values = list(res_sorted.values())
     most_keys = list(res_sorted.keys())
@@ -259,6 +265,35 @@ def plot_xgb_importance(res, label, col_names):
     data.plot(kind='barh')
     plt.show()
     return res_sorted
+
+
+def convert_to_dict(algo_name, dict_str):
+    """
+    Converts the string with the saved best parameters into a dictionary with the n_estimators, min_samples_leaf and max_depth values
+    :param algo_name: FastForest/RandomForest
+    :param dict_str: the best_params dictionary string to parse
+    :return: the dictionary with values for n_estimators, min_samples_leaf and max_depth
+    """
+    dict = {'a' : algo_name}
+    index = dict_str.find('n_estimators')
+    if index >= 0:
+        val_index = dict_str.find(':', index)
+        if dict_str.find(':', index) >= 0:
+            end_index = dict_str.find(',', val_index)
+            dict['n_estimators'] = int(dict_str[val_index + 1:end_index])
+    index = dict_str.find('min_samples_leaf')
+    if index >= 0:
+        val_index = dict_str.find(':', index)
+        if val_index >= 0:
+            end_index = dict_str.find(',', val_index)
+            dict['min_samples_leaf'] = int(dict_str[val_index + 1:end_index])
+    index = dict_str.find('max_depth')
+    if index >= 0:
+        val_index = dict_str.find(':', index)
+        if val_index >= 0:
+            end_index = dict_str.find(',', val_index)
+            dict['max_depth'] = int(dict_str[val_index + 1:end_index])
+    return dict
 
     #######################################  MAIN SECTION #######################################
 
@@ -299,8 +334,7 @@ if __name__ == "__main__":
     #    hyper-parameters (for FF anf RF)
     # 6. Calculate performance measurements (for FF anf RF)
 
-    # for i in range(len(datasets)):
-    if False:
+    for i in range(len(datasets)):
         # 1. read the csv
         file_name = datasets[i]
         # TODO: this works in windows. Comment this and uncomment following line if working in Linux
@@ -424,6 +458,21 @@ if __name__ == "__main__":
             ignore_index=True)
         results_with_avg.to_csv("results_with_avg.csv", index=False)
 
+    # Hyper-parameters analysis
+    hyper_results = pd.DataFrame(columns=['a', 'n_estimators', 'min_samples_leaf', 'max_depth'])
+    for i in range(results.shape[0]):
+        hyper_params = convert_to_dict(results.loc[i, 'Algorithm Name'], results.loc[i, 'Hyper-Parameters Values'])
+        hyper_results = hyper_results.append({'a': hyper_params['a'], 'n_estimators': hyper_params['n_estimators'],
+                                              'min_samples_leaf': hyper_params['min_samples_leaf'],
+                                              'max_depth': hyper_params['max_depth']}, ignore_index=True)
+    ff_est_avg = round(np.mean(hyper_results[hyper_results['a'] == 'FastForest']['n_estimators']), 4)
+    ff_leaf_avg = round(np.mean(hyper_results[hyper_results['a'] == 'FastForest']['min_samples_leaf']), 4)
+    ff_depth_avg = round(np.mean(hyper_results[hyper_results['a'] == 'FastForest']['max_depth']), 4)
+    rf_est_avg = round(np.mean(hyper_results[hyper_results['a'] == 'RandomForest']['n_estimators']), 4)
+    rf_leaf_avg = round(np.mean(hyper_results[hyper_results['a'] == 'RandomForest']['min_samples_leaf']), 4)
+    rf_depth_avg = round(np.mean(hyper_results[hyper_results['a'] == 'RandomForest']['max_depth']), 4)
+    print(ff_est_avg, ff_leaf_avg, ff_depth_avg)
+    print(rf_est_avg, rf_leaf_avg, rf_depth_avg)
 
     #######################################  RESULTS SIGNIFICANCE  #######################################
 
